@@ -28,6 +28,26 @@
 }
 - (BOOL)restore:(NSError **)error {self.restores++;return YES;}
 @end
+// Simulates ServiceManagement without changing this user's real login items.
+@interface FakeLoginService : NSObject
+@property SMAppServiceStatus status;
+@property SMAppServiceStatus registrationStatus;
+@property NSUInteger registrations;
+@property NSUInteger unregistrations;
+@property BOOL fail;
+@end
+@implementation FakeLoginService
+- (BOOL)registerAndReturnError:(NSError **)error {
+    self.registrations++;
+    if(self.fail){if(error)*error=[NSError errorWithDomain:@"UITest" code:2 userInfo:@{NSLocalizedDescriptionKey:@"模拟登录项失败"}];return NO;}
+    self.status=self.registrationStatus;return YES;
+}
+- (BOOL)unregisterAndReturnError:(NSError **)error {
+    self.unregistrations++;
+    if(self.fail){if(error)*error=[NSError errorWithDomain:@"UITest" code:2 userInfo:@{NSLocalizedDescriptionKey:@"模拟登录项失败"}];return NO;}
+    self.status=SMAppServiceStatusNotRegistered;return YES;
+}
+@end
 static BOOL HasApplyButton(NSView *v) {
     if([v isKindOfClass:NSButton.class] && [[(NSButton *)v title]isEqual:@"应用设置"])return YES;
     for(NSView *child in v.subviews)if(HasApplyButton(child))return YES;return NO;
@@ -35,7 +55,23 @@ static BOOL HasApplyButton(NSView *v) {
 int main(void){@autoreleasepool {
     [NSApplication sharedApplication];[NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
     NSString *dir=[NSTemporaryDirectory()stringByAppendingPathComponent:NSUUID.UUID.UUIDString];setenv("TS_TEST_LOG_DIR",dir.UTF8String,1);
-    TestDelegate *d=[TestDelegate new];FakeUIBackend *fake=[FakeUIBackend new];d.backend=(id)fake;[d buildPopover];
+    TestDelegate *d=[TestDelegate new];FakeUIBackend *fake=[FakeUIBackend new];d.backend=(id)fake;
+    FakeLoginService *login=[FakeLoginService new];login.registrationStatus=SMAppServiceStatusEnabled;d.loginService=(id)login;[d buildPopover];
+    CHECK(d.loginButton.state==NSControlStateValueOff && d.loginSettingsButton.hidden);
+    CHECK(login.registrations==0 && login.unregistrations==0);
+    [d.loginButton performClick:nil];CHECK(login.registrations==1 && d.loginButton.state==NSControlStateValueOn);
+    [d.loginButton performClick:nil];CHECK(login.unregistrations==1 && d.loginButton.state==NSControlStateValueOff);
+    login.registrationStatus=SMAppServiceStatusRequiresApproval;
+    [d.loginButton performClick:nil];CHECK(d.loginButton.state==NSControlStateValueOn && !d.loginSettingsButton.hidden);
+    CHECK([d.status.stringValue containsString:@"尚未获准"]);
+    [d.loginButton performClick:nil];CHECK(login.unregistrations==2 && d.loginSettingsButton.hidden);
+    login.fail=YES;[d.loginButton performClick:nil];CHECK(d.loginButton.state==NSControlStateValueOff);
+    CHECK([d.status.stringValue containsString:@"模拟登录项失败"]);
+    login.fail=NO;login.status=SMAppServiceStatusEnabled;[d applicationDidBecomeActive:[NSNotification notificationWithName:NSApplicationDidBecomeActiveNotification object:NSApp]];CHECK(d.loginButton.state==NSControlStateValueOn);
+    login.fail=YES;[d.loginButton performClick:nil];CHECK(d.loginButton.state==NSControlStateValueOn);
+    login.fail=NO;login.status=SMAppServiceStatusNotRegistered;[d refresh];CHECK(d.loginButton.state==NSControlStateValueOff);
+    login.status=SMAppServiceStatusNotFound;[d refreshLoginItem];CHECK(d.loginButton.state==NSControlStateValueOff);
+    CHECK(fake.applies==0 && fake.restores==0);
     CHECK([d.value isKindOfClass:TSRateLabel.class]);
     NSEvent *doubleClick=[NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil eventNumber:1 clickCount:2 pressure:0];[d.value mouseDown:doubleClick];CHECK(d.editRequests==1);
     CHECK(!d.slider.continuous && !d.strengthSlider.continuous);CHECK(fake.applies==0);
@@ -60,5 +96,5 @@ int main(void){@autoreleasepool {
     CHECK(fake.applies==before+2 && fabs(fake.scale-2.375)<1e-12 && fake.strength==3);CHECK(d.slider.doubleValue==2.375 && d.strengthSlider.doubleValue==3);
     CHECK([d doRestore]);CHECK(fake.applies==before+2);
     CHECK(TSFlushLog());[[NSFileManager defaultManager]removeItemAtPath:dir error:NULL];
-    puts("PASS UI: release-only actions, both sliders auto-apply once, no Apply button, startup/refresh/programmatic reset do not apply, restore does not re-enable, failure feedback, precise numeric input, invalid input rejection, preset load applies once, delete does not apply or reset current parameters, 0.10–3.00 range. No input backend or listener started.");
+    puts("PASS UI: login item enable/disable, pending approval cancellation, error rollback, external status sync without real registration or device writes; release-only actions, both sliders auto-apply once, no Apply button, startup/refresh/programmatic reset do not apply, restore does not re-enable, failure feedback, precise numeric input, invalid input rejection, preset load applies once, delete does not apply or reset current parameters, 0.10–3.00 range. No input backend or listener started.");
 }return 0;}

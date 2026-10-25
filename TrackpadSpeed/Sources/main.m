@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#import <ServiceManagement/ServiceManagement.h>
 #import "Backend.h"
 #import "Log.h"
 #import "PointerTrace.h"
@@ -29,6 +30,9 @@
 @property NSStackView *contentStack;
 @property NSTextField *status;
 @property NSButton *restoreButton;
+@property SMAppService *loginService;
+@property NSButton *loginButton;
+@property NSButton *loginSettingsButton;
 @end
 @implementation AppDelegate
 - (NSTextField *)label:(NSString *)text size:(CGFloat)size color:(NSColor *)color {
@@ -39,6 +43,7 @@
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     TSBeginOperation(@"app.start");
+    self.loginService=SMAppService.mainAppService;
     self.backend=[TSBackend new];self.trace=[TSPointerTrace new];self.presets=[TSPresetStore new];TSLog(@"log.retention.policy",@{@"maxFileBytes":@(TSLogFileLimit()),@"maxFiles":@3,@"maxTotalBytes":@(TSLogTotalLimit()),@"legacyFilesIncluded":@YES});TSLog(@"app.start",@{@"system":NSProcessInfo.processInfo.operatingSystemVersionString,@"version":@"0.8.0"});
     self.item=[[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     self.item.button.image=[NSImage imageWithSystemSymbolName:@"cursorarrow.motionlines" accessibilityDescription:@"Trackpad Speed"];
@@ -74,6 +79,11 @@
     self.presetPopup=[[NSPopUpButton alloc]initWithFrame:NSZeroRect pullsDown:NO];[(NSPopUpButtonCell *)self.presetPopup.cell setLineBreakMode:NSLineBreakByTruncatingTail];[self.presetPopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];self.presetPopup.target=self;self.presetPopup.action=@selector(presetSelected:);[self.presetPopup setAccessibilityLabel:@"选择已存设置组并立即应用"];
     [presetRow addArrangedSubview:self.presetPopup];[presetRow addArrangedSubview:[self button:@"保存当前" action:@selector(savePreset:)]];self.deletePresetButton=[self button:@"删除" action:@selector(deletePreset:)];self.deletePresetButton.toolTip=@"删除所选设置组，不改变当前触控板参数";[presetRow addArrangedSubview:self.deletePresetButton];[stack addArrangedSubview:presetRow];
     self.status=[self label:@"" size:12 color:NSColor.secondaryLabelColor];self.status.maximumNumberOfLines=4;self.status.hidden=YES;[stack addArrangedSubview:self.status];[self reloadPresets:nil];
+    self.loginButton=[NSButton checkboxWithTitle:@"登录时自动启动" target:self action:@selector(loginChanged:)];
+    self.loginButton.toolTip=@"登录 Mac 后自动打开菜单栏工具；启动后仍需选择设置组或调节滑块来应用速度。";
+    [stack addArrangedSubview:self.loginButton];
+    self.loginSettingsButton=[self button:@"前往系统登录项批准…" action:@selector(openLoginSettings:)];
+    [stack addArrangedSubview:self.loginSettingsButton];[self refreshLoginItem];
     NSButton *trace=[NSButton checkboxWithTitle:@"记录指针轨迹（调试）" target:self action:@selector(traceChanged:)];[stack addArrangedSubview:trace];
     [stack addArrangedSubview:[self button:@"打开日志文件夹" action:@selector(openLogs:)]];
     for(NSView *v in stack.arrangedSubviews) [v.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active=YES;
@@ -125,11 +135,32 @@
     NSTextField *input=[[NSTextField alloc]initWithFrame:NSMakeRect(0,0,240,24)];input.stringValue=[NSString stringWithFormat:@"%.3f",self.slider.doubleValue];alert.accessoryView=input;alert.window.initialFirstResponder=input;[input selectText:nil];[alert addButtonWithTitle:@"确定"];[alert addButtonWithTitle:@"取消"];
     if([alert runModal]==NSAlertFirstButtonReturn)[self commitRateText:input.stringValue];
 }
+- (void)refreshLoginItem {
+    SMAppServiceStatus status=self.loginService.status;
+    self.loginButton.state=status==SMAppServiceStatusEnabled?NSControlStateValueOn:NSControlStateValueOff;
+    self.loginButton.title=status==SMAppServiceStatusRequiresApproval?@"登录时自动启动（待系统批准）":@"登录时自动启动";
+    // Keep a pending registration checked so clicking it can cancel that registration.
+    if(status==SMAppServiceStatusRequiresApproval)self.loginButton.state=NSControlStateValueOn;
+    self.loginSettingsButton.hidden=status!=SMAppServiceStatusRequiresApproval;[self fitPopover];
+}
+- (void)loginChanged:(NSButton *)sender {
+    BOOL enabled=sender.state==NSControlStateValueOn;NSError *error=nil;
+    BOOL ok=enabled?[self.loginService registerAndReturnError:&error]:[self.loginService unregisterAndReturnError:&error];
+    [self refreshLoginItem];
+    TSLog(@"loginItem.change",@{@"requestedEnabled":@(enabled),@"success":@(ok),@"status":@(self.loginService.status),@"error":error.localizedDescription?:@""});
+    if(enabled && self.loginService.status==SMAppServiceStatusRequiresApproval)
+        [self showStatus:@"自启尚未获准，请点击下方按钮，在系统登录项中允许 Trackpad Speed。"];
+    else if(!ok)[self showStatus:[NSString stringWithFormat:@"%@自启失败：%@",enabled?@"开启":@"关闭",error.localizedDescription?:@"系统未完成操作，请重试。"]];
+    else [self showStatus:nil];
+}
+- (void)openLoginSettings:(id)sender { [SMAppService openSystemSettingsLoginItems]; }
+- (void)applicationDidBecomeActive:(NSNotification *)notification { [self refreshLoginItem]; }
 - (void)traceChanged:(NSButton *)sender {
     if(sender.state==NSControlStateValueOn) {NSError *e=nil;if(![self.trace start:&e]){sender.state=NSControlStateValueOff;[self showStatus:e.localizedDescription?:@"无法启动指针日志。"];}}else [self.trace stop];
 }
 - (void)openLogs:(id)sender { TSFlushLog();[NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:TSLogDirectory() isDirectory:YES]]; }
 - (void)refresh {
+    [self refreshLoginItem];
     NSError *error=nil;BOOL ok=[self.backend inspect:&error];
     self.slider.enabled=ok;self.strengthSlider.enabled=ok;self.restoreButton.enabled=self.backend.hasRecovery;
     if(ok){self.previewBaseline=[self.backend previewBaseline:NULL];[self updatePreview];}
