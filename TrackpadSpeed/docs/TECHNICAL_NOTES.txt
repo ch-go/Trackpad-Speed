@@ -1,0 +1,150 @@
+Trackpad Speed 0.8 — 设置组保存、应用与删除
+
+0.8新增
+- 在设置组列表中选中一组，点击旁边“删除”即可从保存列表中移除。
+- 删除不重新应用或恢复触控板参数，当前倍率与加速对比保持不变。
+- 未选设置组时删除按钮禁用；删除后列表回到占位项，不自动应用其他组。
+- 删除原子写入并读回验证，失败显示错误；无效/损坏文件不会被覆盖。
+
+0.7已有功能
+- 保存当前倍率与加速对比为命名设置组；从列表选择即可快速应用。
+  同名保存会更新原设置组，保存本身不额外写设备。配置在
+  ~/Library/Application Support/TrackpadSpeed/presets.json；格式损坏时保留文件并报错。
+- 双击蓝色倍率数字，输入1–4范围内的精确值，最多3位小数，例如2.375。
+  确认后立即应用；普通拖动仍按0.05步进，选择设置组不会把精确数值取整。
+- 加速对比范围扩至0.10–3.00，仍围绕固定参考点归一化，不是物理速度倍数。
+- 删除页面说明段落和成功验证提示；正常操作只显示控件，失败/需要恢复时才提示。
+- 日志单文件2MiB，最多3份，总量不超过约6MiB；旧版遗留的本应用日志也纳入清理。
+
+两个滑块如何分工
+1. 整体速度（1–4×）：统一放大曲线输出，决定整体快慢。
+2. 加速对比（0.10–3.00）：决定慢移和快移的差距。
+   1.00保持原曲线；调高后，参考点以下更慢、以上更快；调低则相反。
+   对比不是额外速度倍数，也不是“越低就整体越慢”。
+
+参考点是什么
+以应用时系统跟踪速度索引对应的原始曲线为基准，优先选择线性贡献与非线性
+加速贡献相等的位置。这比在非线性项已经占主导后归一化，更能形成有意义的对比。
+如果首段内没有这样的均衡点，则使用第一个转折速度的一半作为参考。
+这个点是Apple曲线模型中的数学输入，不声称等于实测平均手速。
+
+同一整体倍率下，改变对比不会改变这个参考点的目标输出。图上灰线是“同倍率原曲线”，
+蓝线是目标曲线，圆点及虚线标记参考点。预览展示参考点周围的速度区间，不是实测轨迹。
+整体倍率变化仍会改变参考点的输出；固定的是改变“对比”前后的参考点。
+
+如何使用
+- 先退出旧版，再打开0.8；日志app.start应显示version=0.8.0。
+- 先把整体速度调到舒适值，例如2.5×，再把对比从1调到1.25或1.5。
+  同时比较慢移定位与快移跨屏。对比更高应拉大二者差距。
+- 松开任一滑块后自动应用一次，不需要应用按钮；键盘调整也触发控件动作。
+- 启动、刷新、程序赋值不改设备；恢复时更新滑块不会重新应用。
+- 恢复原始值同时撤销两项修改。睡眠时尝试恢复；唤醒后不自动重新启用。
+- 如果修改了macOS系统跟踪速度，再调一下应用滑块，以新索引重新建立参考点。
+- 如果有旧恢复记录，请先恢复；不要同时运行其他调速工具。
+
+原理
+原始参数函数首段为 F(x)=a*x+(b*x)^2+(c*x)^3+(d*x)^4，之后接线性和平方根段。
+先用对比h调整非线性贡献得到F_h，再计算 N=F(x_ref)/F_h(x_ref)。
+最终曲线为 m*N*F_h(x)，其中m为整体倍率。这让参考点输出等于m*F(x_ref)。
+
+参数落地为：线性系数乘m*N，二/三/四次系数分别乘sqrt(m*N*h)、cbrt(m*N*h)、
+四次根(m*N*h)。所有系统索引曲线使用同一个归一化系数，因此与当前索引插值兼容。
+转折速度与曲线索引保留；Apple算法重算相接区间，保持平滑。对比1与旧版纯倍率一致。
+原始曲线缺少线性/非线性组合时，对比效果可能有限，不强行制造新的加速度。
+
+使用16.16定点数，生成后校验参考点相对偏差，超过0.2%则拒绝应用。
+这只是数学模型和参数校验，不代表已经独立测量物理手势到屏幕的精确倍率。
+
+写入与验证
+- 只定位Built-In=true且HIDPointerAccelerationType=HIDTrackpadAcceleration的唯一服务。
+- 通过Passive HID客户端设置UserPointerAccelCurvesKey，不倍增全局鼠标事件。
+- 该精确键在本机Apple二进制中存在，对应开源指针过滤器的用户覆盖入口；
+  设置后过滤器优先使用覆盖数组并直接重建加速度。
+- 不改系统跟踪速度索引、分辨率、滚动参数或外接鼠标设置。
+- 从完整ServiceRecords读取目标设备的IOHIDPointerScrollFilter.Property和实际
+  Pointer Accelerator.Accelerator。覆盖数组与实际采用系数都匹配，才确认参数层完成。
+- 原先单次ServiceFilterDebug只返回首个过滤器，普通HIDAccelCurves getter又可能只
+  返回驱动默认值，因此二者都不能代替完整状态检查。
+- 写入Boolean=true不等于成功；实际参数匹配也不等于物理倍率已经测量。
+
+恢复与旧版兼容
+首次修改前备份完整原始曲线、覆盖数组、原始实际系数、启动UUID和设备registryID，
+原子写入、fsync并读回后才写设备。始终从同一原始基准计算，不逐次累乘。
+现有v3记录仍兼容，无须改写备份格式。
+
+原先没有用户覆盖时，恢复写空数组，让Apple实现回退到驱动曲线；这是等效行为恢复，
+缓存可能保留空数组键，不承诺删除原先不存在的键。实际过滤器也要核对。
+失败时尽力回滚并保留恢复记录；成功后归档原始备份，不悄悄删除。
+
+0.1/0.2曾写入插件内部缓存，但普通getter仍返回原值，导致旧版误判与漏清缓存。
+本版兼容这些v1/v2记录，强制恢复内部缓存，再刷新并验证实际系数。
+也能只读识别同启动会话、同设备、原值匹配的旧归档，供用户主动清理残留。
+不同启动会话的记录只在明确恢复时归档，不向新设备套用旧状态。
+异常退出不保证自动恢复，可重新打开后主动恢复，失败则保留日志诊断。
+
+日志与导出
+~/Library/Application Support/TrackpadSpeed/Logs/trace-v2.jsonl
+轮转trace-v2.1.jsonl、trace-v2.2.jsonl；每个最多2MiB，最多3份，总量约6MiB。
+进程间加锁追加；旧日志过大时只保留末尾完整JSON行，份数超限时淘汰最旧文件。
+恢复备份和设置组文件不属于日志，不会被日志清理删除。
+0.2及更新版本共用格式，通过version/pid/operationID区分。旧trace.jsonl及其轮转文件也纳入上述预算，不无限保留历史日志。
+
+每个操作由operation.begin/end包围，嵌套带parentOperationID，每行有unixTime/uptime/pid。
+主要链路：
+- ui.settings.commit：来源（滑块/数字输入/设置组）、倍率和curveStrength（加速对比）
+- presets.read/save/select/delete：设置组读写、原子落盘验证和选择
+- log.retention.policy/trim/remove：日志限额、旧文件裁剪及淘汰
+- client.symbol/create.result：私有SPI动态符号和Passive客户端创建结果
+- device.candidate/enumeration/identify：设备筛选及目标registryID/class
+- state.records.read/snapshot：驱动、插件内部缓存、覆盖和实际过滤器系数
+- recovery.read/validated/legacy.residue.detected：恢复记录、残留与原始文件哈希
+- backup.prepare/verify/durable：原始曲线、可靠落盘和SHA-256
+- curves.scale：原始/目标数组与哈希、对比参数，以及anchor元数据
+  anchor包含algorithm、referenceRule、referenceIndex、referenceInput、normalization、
+  coefficientFactors、targetReferenceOutput、quantizedReferenceOutput、referenceRelativeError
+- property.write.request/result：目标节点、键、阶段、API返回；Boolean接口不提供底层IOReturn
+- override.readback：实际覆盖的哈希与逐字段差异
+- filter.active.verify：实际过滤器与目标系数比较，physicalEffectVerified仍为false
+- legacy.cache.verify：旧版隐藏缓存的真实恢复结果
+- apply.failed.stage/独立rollback操作：每个回滚子步骤与失败原因
+- recovery.retained/archive：记录保留或归档结果；不删除原始备份内容
+- app.quit、system.sleep/wake：退出、恢复、唤醒与是否自动启用
+
+操作日志始终记录；指针监听默认关闭。勾选调试后记录pointer.output、mouse.button、
+mouse.scroll与监听权限/中断事件。不记录键盘、窗口标题、文档和屏幕截图。
+CGEvent属于会话事件，不是原始触点；producerPID不是设备ID，无法可靠区分物理来源。
+因此一次测试只用一种设备；带中断的日志不能当连续测量。
+日志含屏幕坐标，分享前请检查。应用可打开日志文件夹，复制Logs文件夹后用Finder压缩。
+
+摘要：python3 analyze-log.py '/完整路径/trace-v2.jsonl'
+追踪一次操作及子操作：
+python3 analyze-log.py '/完整路径/trace-v2.jsonl' --operation 'UUID'
+
+兼容性
+Apple Silicon构建，最低macOS14；本机系统为macOS27.0.1。
+Passive客户端通过dlsym调用私有IOHIDEventSystemClientCreateWithType(type=2)，
+UserPointerAccelCurvesKey与ServiceRecords调试结构属于内部协议，没有Apple稳定支持承诺。
+不可用时停止，不切换Admin/Monitor、不提权、不申请私有entitlement或关闭系统保护。
+
+验证
+- 构建、ad-hoc严格签名和plist检查。
+- 1,408个纯倍率样本；11,264个倍率/对比样本；7,296个锚点及慢快交叉行为样本，含0.10和3.00。
+- 对比1与原纯倍率逐项一致；参考点误差不超过0.2%；正向单调，无负速度或反向段。
+- 模拟恢复/回滚/隐藏缓存/归档残留/实际过滤器验证；两个并发进程200条日志完整。
+- 离线UI测试确认松手自动生效、恢复不被回调抵消、启动和刷新不写设备。
+- 离线渲染检查曲线参考点和界面布局，没有连接输入设备。
+0.3的真实日志曾确认覆盖与实际系数匹配，用户反馈提速。0.6真实日志已确认归一化曲线被实际过滤器采用。0.7新增的范围极值、
+设置组和精确输入由用户主动试用；开发时没有改动当前机器设置。
+
+构建
+./build.sh：只构建上一级Trackpad Speed.app，不运行。
+./test.sh：数学与模拟恢复测试。
+./test-ui.sh：无输入后端的控件、精确输入与设置组一选即用测试。
+./test-storage.sh：设置组读写、坏文件保护、旧日志迁移与大小上限测试。
+'../Trackpad Speed.app/Contents/MacOS/TrackpadSpeed' --diagnose-only：只读诊断。
+
+依据
+Apple本机IOHIDPointerScrollFilter/HSTouchHIDService二进制，以及Apple开源代码：
+https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDEventSystemPlugIns/IOHIDPointerScrollFilter.cpp
+https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDEventSystemPlugIns/IOHIDAccelerationAlgorithm.cpp
+https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/tools/IOHIDEventSystemMonitor.c
