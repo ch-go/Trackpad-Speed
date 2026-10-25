@@ -33,6 +33,10 @@
 @property SMAppService *loginService;
 @property NSButton *loginButton;
 @property NSButton *loginSettingsButton;
+@property NSDictionary *lastAppliedSettings;
+@property BOOL resumePending;
+@property NSUInteger wakeAttempts;
+@property NSTimer *wakeTimer;
 @end
 @implementation AppDelegate
 - (NSTextField *)label:(NSString *)text size:(CGFloat)size color:(NSColor *)color {
@@ -44,7 +48,7 @@
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     TSBeginOperation(@"app.start");
     self.loginService=SMAppService.mainAppService;
-    self.backend=[TSBackend new];self.trace=[TSPointerTrace new];self.presets=[TSPresetStore new];TSLog(@"log.retention.policy",@{@"maxFileBytes":@(TSLogFileLimit()),@"maxFiles":@3,@"maxTotalBytes":@(TSLogTotalLimit()),@"legacyFilesIncluded":@YES});TSLog(@"app.start",@{@"system":NSProcessInfo.processInfo.operatingSystemVersionString,@"version":@"0.8.0"});
+    self.backend=[TSBackend new];self.trace=[TSPointerTrace new];self.presets=[TSPresetStore new];TSLog(@"log.retention.policy",@{@"maxFileBytes":@(TSLogFileLimit()),@"maxFiles":@3,@"maxTotalBytes":@(TSLogTotalLimit()),@"legacyFilesIncluded":@YES});TSLog(@"app.start",@{@"system":NSProcessInfo.processInfo.operatingSystemVersionString,@"version":@"0.8.1"});
     self.item=[[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     self.item.button.image=[NSImage imageWithSystemSymbolName:@"cursorarrow.motionlines" accessibilityDescription:@"Trackpad Speed"];
     self.item.button.target=self;self.item.button.action=@selector(toggle:);
@@ -188,26 +192,30 @@
     if(self.previewBaseline)[self.curvePreview updateCurves:self.previewBaseline[@"curves"] index:[self.previewBaseline[@"index"]doubleValue] scale:self.slider.doubleValue strength:self.strengthSlider.doubleValue];
 }
 - (void)apply:(id)sender {
+    [self.wakeTimer invalidate];self.wakeTimer=nil;self.resumePending=NO;
     TSBeginOperation(@"ui.settings.commit");
     NSString *source=sender==self.slider?@"speedSlider":sender==self.strengthSlider?@"contrastSlider":sender==self.value?@"numericInput":@"preset";
     TSLog(@"ui.settings.commit",@{@"control":source,@"targetScale":@(self.slider.doubleValue),@"curveStrength":@(self.strengthSlider.doubleValue),@"trigger":source});
     NSError *error=nil;
     BOOL applied=[self.backend apply:self.slider.doubleValue strength:self.strengthSlider.doubleValue error:&error];
     if(applied) {
+        self.lastAppliedSettings=@{@"scale":@(self.slider.doubleValue),@"contrast":@(self.strengthSlider.doubleValue)};
         [self showStatus:nil];
         self.item.button.toolTip=[NSString stringWithFormat:@"目标 %.2f× · 加速对比 %.2f",self.slider.doubleValue,self.strengthSlider.doubleValue];
     } else {TSLog(@"apply.failed",@{@"error":error.localizedDescription?:@"unknown"});[self showStatus:[NSString stringWithFormat:@"应用失败：%@",error.localizedDescription]];}
     self.restoreButton.enabled=self.backend.hasRecovery;TSEndOperation(applied,error);TSFlushLog();
 }
 - (BOOL)doRestore {
+    [self.wakeTimer invalidate];self.wakeTimer=nil;self.resumePending=NO;
     NSError *error=nil;
     if(![self.backend restore:&error]) { TSLog(@"restore.failed",@{@"error":error.localizedDescription?:@"unknown"});[self showStatus:[NSString stringWithFormat:@"恢复失败：%@",error.localizedDescription]];return NO; }
-    [self.presetPopup selectItemAtIndex:0];self.deletePresetButton.enabled=NO;self.slider.doubleValue=1;self.strengthSlider.doubleValue=1;[self strengthChanged:nil];[self slide:nil];self.item.button.toolTip=@"原始曲线";
+    [self.presetPopup selectItemAtIndex:0];self.deletePresetButton.enabled=NO;self.slider.doubleValue=1;self.strengthSlider.doubleValue=1;[self strengthChanged:nil];[self slide:nil];self.item.button.toolTip=@"原始曲线";self.lastAppliedSettings=nil;
     [self showStatus:nil];self.restoreButton.enabled=NO;return YES;
 }
 - (void)restore:(id)sender { [self doRestore]; }
 - (void)quit:(id)sender { [NSApp terminate:nil]; }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    [self.wakeTimer invalidate];self.wakeTimer=nil;self.resumePending=NO;
     TSBeginOperation(@"app.quit");
     TSLog(@"app.quit.request",@{@"recoveryPending":@(self.backend.hasRecovery)});
     if(self.backend.hasRecovery && ![self doRestore]) {
@@ -219,12 +227,39 @@
     [self.trace stop];TSLog(@"app.quit",@{});TSEndOperation(YES,nil);TSFlushLog();return NSTerminateNow;
 }
 - (void)sleep:(NSNotification *)notification {
-    TSBeginOperation(@"system.sleep");TSLog(@"system.sleep",@{@"recoveryPending":@(self.backend.hasRecovery)});
-    BOOL ok=!self.backend.hasRecovery || [self doRestore];TSEndOperation(ok,nil);TSFlushLog();
+    [self.wakeTimer invalidate];self.wakeTimer=nil;
+    self.resumePending=self.resumePending || (self.backend.active && self.lastAppliedSettings!=nil);
+    TSBeginOperation(@"system.sleep");TSLog(@"system.sleep",@{@"recoveryPending":@(self.backend.hasRecovery),@"resumePending":@(self.resumePending),@"settings":self.lastAppliedSettings?:@{}});
+    // Restore the device for sleep, keeping the user's successful settings and UI intact.
+    NSError *error=nil;BOOL ok=!self.backend.hasRecovery || [self.backend restore:&error];
+    if(!ok)[self showStatus:[NSString stringWithFormat:@"休眠前恢复失败：%@",error.localizedDescription]];
+    TSEndOperation(ok,error);TSFlushLog();
 }
 - (void)wake:(NSNotification *)notification {
-    TSBeginOperation(@"system.wake");TSLog(@"system.wake",@{@"autoApply":@NO});[self refresh];
-    if(!self.backend.hasRecovery)[self showStatus:nil];TSEndOperation(YES,nil);
+    [self.wakeTimer invalidate];self.wakeTimer=nil;self.wakeAttempts=0;
+    TSBeginOperation(@"system.wake");TSLog(@"system.wake",@{@"autoApply":@(self.resumePending)});
+    if(self.resumePending)self.wakeTimer=[NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(resumeAfterWake:) userInfo:nil repeats:NO];
+    else [self refresh];
+    TSEndOperation(YES,nil);TSFlushLog();
+}
+- (void)resumeAfterWake:(NSTimer *)timer {
+    [self.wakeTimer invalidate];self.wakeTimer=nil;
+    if(!self.resumePending || !self.lastAppliedSettings)return;
+    self.wakeAttempts++;
+    TSBeginOperation(@"system.wake.reapply");
+    NSError *error=nil;
+    BOOL ok=[self.backend apply:[self.lastAppliedSettings[@"scale"]doubleValue] strength:[self.lastAppliedSettings[@"contrast"]doubleValue] error:&error];
+    TSLog(@"system.wake.reapply",@{@"attempt":@(self.wakeAttempts),@"success":@(ok),@"settings":self.lastAppliedSettings,@"error":error.localizedDescription?:@""});
+    if(ok){
+        self.resumePending=NO;
+        self.slider.doubleValue=[self.lastAppliedSettings[@"scale"]doubleValue];self.strengthSlider.doubleValue=[self.lastAppliedSettings[@"contrast"]doubleValue];
+        [self slide:nil];[self strengthChanged:nil];
+        self.item.button.toolTip=[NSString stringWithFormat:@"目标 %.2f× · 加速对比 %.2f",self.slider.doubleValue,self.strengthSlider.doubleValue];
+        [self refresh];
+    }
+    else if(self.wakeAttempts<5)self.wakeTimer=[NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(resumeAfterWake:) userInfo:nil repeats:NO];
+    else {self.resumePending=NO;[self showStatus:[NSString stringWithFormat:@"唤醒后自动应用失败，请重新选择设置组或调节滑块：%@",error.localizedDescription?:@"设备尚未就绪。"]];}
+    self.restoreButton.enabled=self.backend.hasRecovery;TSEndOperation(ok,error);TSFlushLog();
 }
 
 @end

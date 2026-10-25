@@ -95,6 +95,33 @@ int main(void){@autoreleasepool {
     CHECK(d.deletePresetButton.enabled);[d deletePreset:nil];CHECK([d.presets load:&error].count==0);CHECK(!d.deletePresetButton.enabled);
     CHECK(fake.applies==before+2 && fabs(fake.scale-2.375)<1e-12 && fake.strength==3);CHECK(d.slider.doubleValue==2.375 && d.strengthSlider.doubleValue==3);
     CHECK([d doRestore]);CHECK(fake.applies==before+2);
+    // Sleep/wake uses a fake device; invoke timer callbacks directly, without waiting.
+    [d sleep:nil];[d wake:nil];CHECK(!d.resumePending && !d.wakeTimer);
+    CHECK([d commitRateText:@"2.375"]);d.strengthSlider.doubleValue=2.45;[d strengthChanged:d.strengthSlider];
+    NSUInteger sleepApplies=fake.applies,sleepRestores=fake.restores;
+    [d sleep:nil];CHECK(d.resumePending && fake.restores==sleepRestores+1);
+    CHECK(d.slider.doubleValue==2.375 && fabs(d.strengthSlider.doubleValue-2.45)<1e-12);
+    [d sleep:nil];[d wake:nil];CHECK(d.wakeTimer && fake.applies==sleepApplies);
+    [d wake:nil];[d resumeAfterWake:nil];CHECK(fake.applies==sleepApplies+1 && !d.resumePending && !d.wakeTimer);
+    CHECK(fake.scale==2.375 && fabs(fake.strength-2.45)<1e-12);
+    // Failed edits must not become the settings used after wake.
+    fake.failApply=YES;[d commitRateText:@"3.5"];fake.failApply=NO;
+    [d sleep:nil];[d wake:nil];[d resumeAfterWake:nil];CHECK(fake.scale==2.375 && d.slider.doubleValue==2.375);
+    [d sleep:nil];[d wake:nil];fake.failApply=YES;
+    [d resumeAfterWake:nil];CHECK(d.resumePending && d.wakeTimer && d.wakeAttempts==1);
+    fake.failApply=NO;[d resumeAfterWake:nil];CHECK(!d.resumePending && !d.wakeTimer && d.wakeAttempts==2);
+    [d sleep:nil];[d wake:nil];fake.failApply=YES;
+    for(int attempt=0;attempt<5;attempt++)[d resumeAfterWake:nil];
+    CHECK(!d.resumePending && !d.wakeTimer && d.wakeAttempts==5);
+    CHECK([d.status.stringValue containsString:@"唤醒后自动应用失败"]);
+    NSUInteger exhausted=fake.applies;[d resumeAfterWake:nil];CHECK(fake.applies==exhausted);
+    fake.failApply=NO;CHECK([d commitRateText:@"2"]);
+    [d sleep:nil];[d wake:nil];CHECK([d doRestore]);NSUInteger cancelled=fake.applies;
+    [d resumeAfterWake:nil];[d wake:nil];CHECK(fake.applies==cancelled && !d.wakeTimer && !d.lastAppliedSettings);
+    CHECK([d commitRateText:@"2"]);[d sleep:nil];[d wake:nil];CHECK([d commitRateText:@"3"]);
+    cancelled=fake.applies;[d resumeAfterWake:nil];CHECK(fake.applies==cancelled && !d.wakeTimer && fake.scale==3);
+    CHECK([d doRestore]);
+    puts("PASS sleep/wake: preserve successful settings, delayed reapply, repeated notifications, retry then success, five-attempt limit, restore/manual-edit cancellation, failed edit exclusion. No device writes.");
     CHECK(TSFlushLog());[[NSFileManager defaultManager]removeItemAtPath:dir error:NULL];
     puts("PASS UI: login item enable/disable, pending approval cancellation, error rollback, external status sync without real registration or device writes; release-only actions, both sliders auto-apply once, no Apply button, startup/refresh/programmatic reset do not apply, restore does not re-enable, failure feedback, precise numeric input, invalid input rejection, preset load applies once, delete does not apply or reset current parameters, 0.10–3.00 range. No input backend or listener started.");
 }return 0;}
