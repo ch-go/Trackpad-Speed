@@ -1,0 +1,26 @@
+# macOS metadata
+.DS_Store
+._*
+__MACOSX/
+
+# IntelliJ IDEA local project settings
+.idea/
+*.iml
+
+# Generated build output
+.build/
+build/
+DerivedData/
+*.app/
+*.dSYM/
+*.o
+*.a
+*.xcuserstate
+xcuserdata/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Generated distribution archives
+*.zip
